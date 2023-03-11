@@ -5,16 +5,20 @@ void setup() {
   EEPROM.begin(512);
   timeLast = millis();
   if(WiFi.status() != WL_CONNECTED) wifiManager.autoConnect(host);
-  //setup server mqtt
-  client.setServer(mqtt_host, mqtt_port);
-  client.setCallback(callback);
-  if (!client.connected()) reconnect();
   //Config time
   configTime(timezone, dst,"pool.ntp.org","time.nist.gov");
   while(!time(nullptr)){
     Serial.print(".");
     delay(1000);
   }
+  // set root ca cert
+  X509List x509(root_ca);
+  espClient.setTrustAnchors(&x509);
+  //setup server mqtt
+  client.setServer(mqtt_host, mqtt_port);
+  client.setCallback(callback);
+  if (!client.connected()) reconnect();
+
   if(EEPROM.read(0) == 1) newsOTA_result();
 }
 
@@ -22,59 +26,70 @@ void loop() {
   if (Serial.available()) readUart();
   if(WiFi.status() != WL_CONNECTED) wifiManager.autoConnect(host);
   if (!client.connected()) reconnect();
-  if(topicStr == mqtt_publish_ota) newsOTA();
+  if(topicStr == publish_ota) newsOTA();
   if (flagCommand == true) checkCommandWord();
+  if(fire == 1) newsEvent();
   newsStatus();
   client.loop();
 }
 
 void newsStatus(){
-  int timeStatus;
-  if(fire == 0){
-    timeStatus = 30000;
-  }
-  else if(fire == 1)
-  {
-    timeStatus = 5000;
-  }
-  if ((millis() - timeLast) > timeStatus) {
+  if ((millis() - timeLast) > 30000) {
     timeLast = millis();
-    String status = "";
-    status += "{\n  ";
-    status += '"';
-    status += "pin";
-    status += '"';
-    status += ": " + pin + "\n  ";
-    status += '"';
-    status += "fire";
-    status += '"';
-    status += ": " + String(fire) + "\n  ";
-    status += '"';
-    status += "time";
-    status += '"';
-    status += ": " + printTime() + "\n}";
-    for(int i=0; i< MSG_BUFFER_SIZE; i++){
-      message[i] = '\0';
+    String tempPayload = "";
+    String tempTopic = "";
+    tempPayload += "{";
+    tempPayload += "\"battery\":" + String(battery);
+    tempPayload += ",\"mobile_network\":0";
+    tempPayload += ",\"ethernet\":1";
+    tempPayload += ",\"rs485\":0";
+    tempPayload += ",\"pan_err\":[]";
+    tempPayload += ",\"temp\":25";
+    tempPayload += ",\"timestamp\":" + printTime();
+    tempPayload += ",\"sensor\":[]}";
+    tempTopic += "$" + String(deviceUsername) + String(deviceModel) + publish_status + "/"+ md5(tempPayload + String(deviceSecret));
+    client.publish(tempTopic.c_str(), tempPayload.c_str());
+  }
+}
+
+void newsEvent(){
+  if(flagEvent == false){
+    timeEvent = printTime();
+    flagEvent = true;
+    timeLast = millis() - 4000;
+  }
+  if ((millis() - timeLast) > 3000) {
+    timeLast = millis();
+    String tempPayload = "";
+    String tempTopic = "";
+    String event_id = "";
+    int i = 1;
+    while(timeEvent[i] != '"'){
+      if(timeEvent[i] >= '0' && timeEvent[i] <= '9'){
+        event_id += timeEvent[i];
+      }
+      i++;
     }
-    for(int i=0; i< status.length(); i++){
-      message[i] = status[i];
-    }
-   client.publish(mqtt_publish_status, message);
+    tempPayload += "{";
+    tempPayload += "\"type\":\"FIRE\"";
+    tempPayload += ",\"timestamp\":" + timeEvent;
+    tempPayload += ",\"sensor\":[]";
+    tempPayload += ",\"io\":[]";
+    tempPayload += ",\"rs\":[]";
+    tempPayload += ",\"event_id\":\"" + event_id + "\"}";
+    tempTopic += "$" + String(deviceUsername) + String(deviceModel) + publish_event + "/" + md5(tempPayload+ String(deviceSecret));
+    client.publish(tempTopic.c_str(), tempPayload.c_str());
   }
 }
 
 void newsOTA(){
+  wifiManager.resetSettings();
   topicStr = "\0";
   int i = 0;
-  String versionStr = "version_id";
-  versionStr += '"';
-  versionStr += ": ";
-  String urlStr = "url";
-  urlStr += '"';
-  urlStr += ": ";
+  String versionStr = "\"version_id\":";
+  String urlStr = "\"url\":";
   int lengthStr = 0;
   int viTriStr = String(payloadStr).indexOf(versionStr);
-
   if(viTriStr != -1){
     lengthStr = versionStr.length();
     versionStr = "";
@@ -129,29 +144,17 @@ void newsOTA_result(){
   }  
   EEPROM.commit(); 
 
-  s += "{\n  ";
-  s += '"';
-  s += "version_id";
-  s += '"';
-  s += ": " + String(version_id) + ",\n  ";
-  s += '"';
-  s += "url";
-  s += '"';
-  s += ": ";
-  s += '"';
-  s += url;
-  s += '"';
-  s += ",\n  ";
-  s += '"';
-  s += "status";
-  s += ": " + String(statusOTA) + "\n}";
+  s += "{\n";
+  s += "\"version_id\":" + String(version_id) + ",\n";
+  s += "\"url\":" + url + ",\n";
+  s += "\"status\":" + String(statusOTA) + "\n}";
   for(int i = 0; i < MSG_BUFFER_SIZE; i++){
     message[i] = '\0';
   }
   for(int i = 0; i < s.length(); i++){
     message[i] = s[i];
   }
-  client.publish(mqtt_publish_ota_result, message);
+  client.publish(publish_ota_result, message);
 }
 
 void checkUpdate(){
@@ -161,37 +164,48 @@ void checkUpdate(){
     url += char(EEPROM.read(address));
     address++;
   }
-  String versionStr = "esp8266.ino." + String(version_id);
-  Serial.print("\nDang tien hanh update firmware");
-  client.publish(mqtt_publish_ota,"{\n  Start update firmware\n}");
+  String versionStr = "firmware." + String(version_id);
+  Serial.println("\nDang tien hanh update firmware");
+  Serial.print(url);
   ESPhttpUpdate.update(espClient, url, versionStr);
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
   topicStr = String(topic);
-  if(topicStr != mqtt_publish_smoke){
-    Serial.print("Message arrived [");
-    Serial.print(topic);
-    Serial.println("]");
-    payloadStr = "";
-    for (int i = 0; i < length; i++) {
-      Serial.print((char)payload[i]);
-      payloadStr += (char)payload[i];
-    }
-    Serial.println();
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.println("]");
+  payloadStr = "";
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+    payloadStr += (char)payload[i];
   }
+  Serial.println();
 }
 
 void reconnect() {
-  // Loop until we're reconnected
+  String tempStr = "";
+  const char willMessage[] = "{\"status_code\":0}";
+  tempStr += "$" + String(deviceUsername) + deviceModel + publish_connection + "/" + md5(String(willMessage) + String(deviceSecret));
+  char willTopic[tempStr.length()];
+  for(int i = 0; i < tempStr.length(); i++){
+    willTopic[i] = tempStr[i];
+  }
+      willTopic[tempStr.length()] = '\0';
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
-    if (client.connect(mqtt_clientID, mqtt_username, mqtt_pass)) {
+    if (client.connect(mqtt_clientID, mqtt_username, mqtt_pass, willTopic, 0, 1, willMessage)) {
       Serial.println("connected");
-      // Once connected, publish an announcement...
-      client.publish(mqtt_publish_status, "connected");
-      // ... and resubscribe
-      client.subscribe(mqtt_subscribe);
+      tempStr = "";
+      char payload[] = "{\"status_code\":1}";
+      tempStr += "$" + String(deviceUsername) + deviceModel + publish_connection + "/" + md5(String(payload) + String(deviceSecret));
+      char topic[tempStr.length()];
+      for(int i = 0; i < tempStr.length(); i++){
+        topic[i] = tempStr[i];
+      }
+      topic[tempStr.length()] = '\0';
+      client.publish(topic, payload);
+      client.subscribe(publish_ota);
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -205,24 +219,22 @@ void reconnect() {
 String printTime(){
   String strTime;
   time_t now = time(nullptr);
-  struct tm* p_tm = localtime(&now);
+  struct tm* timeInfo = localtime(&now);
 
-  strTime += '"' + String(p_tm->tm_year + 1900) + '-';
-  if((p_tm->tm_mon + 1) < 10) strTime += '0' + String(p_tm->tm_mon + 1) + '-';
-  else strTime += String(p_tm->tm_mon + 1) + '-'; 
-  if((p_tm->tm_mday) < 10) strTime += '0' + String(p_tm->tm_mday) + ' '; 
-  else strTime += String(p_tm->tm_mday) + ' ';
-  if((p_tm->tm_hour) < 10) strTime += '0' + String(p_tm->tm_hour) + ':';
-  else strTime += String(p_tm->tm_hour) + ':';
-  if((p_tm->tm_min) < 10) strTime += '0' +String(p_tm->tm_min) + ':';
-  else strTime += String(p_tm->tm_min) + ':';
-  if((p_tm->tm_sec) < 10) strTime += '0' + String(p_tm->tm_sec);
-  else strTime += String(p_tm->tm_sec);  
+  strTime += '"' + String(timeInfo->tm_year + 1900) + '-';
+  if((timeInfo->tm_mon + 1) < 10) strTime += '0' + String(timeInfo->tm_mon + 1) + '-';
+  else strTime += String(timeInfo->tm_mon + 1) + '-'; 
+  if((timeInfo->tm_mday) < 10) strTime += '0' + String(timeInfo->tm_mday); 
+  else strTime += String(timeInfo->tm_mday);
+  if((timeInfo->tm_hour) < 10) strTime += "T0" + String(timeInfo->tm_hour) + ':';
+  else strTime += 'T' + String(timeInfo->tm_hour) + ':';
+  if((timeInfo->tm_min) < 10) strTime += '0' +String(timeInfo->tm_min) + ':';
+  else strTime += String(timeInfo->tm_min) + ':';
+  if((timeInfo->tm_sec) < 10) strTime += '0' + String(timeInfo->tm_sec);
+  else strTime += String(timeInfo->tm_sec);  
   strTime += '"';
   return strTime;
 }
-
-//smoke alarm
 
 void readUart(){
   int dataUart = Serial.read();
@@ -328,7 +340,6 @@ void productInformation(){
     Serial.print(tempStr[i]);
     tempStr[i+1] = '\0';
   }
- client.publish(mqtt_publish_smoke, tempStr); 
 }
 
 void productFunction(){
@@ -391,6 +402,7 @@ void SmokeDetectionStatus(int typeData, int featureProductLength, int featurePro
   } 
   else if (featureProduct == 0x01){
     fire = 0;
+    flagEvent = false;
     Serial.println("xoa canh bao khoi");
     //client.publish(mqtt_publish_smoke,"Đã xóa cảnh báo khói");
   } 
@@ -414,31 +426,20 @@ void errorMessage(int typeData, int featureProductLength, int featureProduct){
 }
 
 void batteryStatus(int typeData, int featureProductLength, int featureProduct){
-  pin = "";
   if(featureProduct == 0x00){
-    pin += '"';
-    pin += "low";
-    pin += '"';
+    battery = 0;
     Serial.print("Trang thai pin yeu");
-    //client.publish(mqtt_publish_smoke,"Trạng thái pin yếu");
   } 
   else if (featureProduct == 0x01){
-    pin += '"';
-    pin += "middle";
-    pin += '"';
+    battery = 50;
     Serial.print("Trang thai pin trung binh");
-    //client.publish(mqtt_publish_smoke,"Trạng thái pin trung bình");
   } 
   else if (featureProduct == 0x02){
-    pin += '"';
-    pin += "high";
-    pin += '"';
+    battery = 100;
     Serial.print("Trang thai pin cao");
-    //client.publish(mqtt_publish_smoke,"Trạng thái pin cao");
   }
   else{
     Serial.print("Trang thai pin error");
-    //client.publish(mqtt_publish_smoke,"Yêu cầu gửi giá trị Trạng thái pin");
   }
 }
 
@@ -508,3 +509,9 @@ bool checkSum(){
   }
 }
 
+String md5(String str) {
+  _md5.begin();
+  _md5.add(String(str));
+  _md5.calculate();
+  return _md5.toString();
+}
